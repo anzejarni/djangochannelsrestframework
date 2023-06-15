@@ -64,6 +64,10 @@ class ModelObserver(BaseObserver):
             self.post_init_receiver, sender=self.model_cls, dispatch_uid=id(self)
         )
 
+        m2m_changed.connect(
+            self.post_save_receiver, sender=self.model_cls, dispatch_uid=id(self)
+        )
+
         post_save.connect(
             self.post_save_receiver, sender=self.model_cls, dispatch_uid=id(self)
         )
