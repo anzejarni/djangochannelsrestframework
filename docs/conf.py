@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(".."))
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Setup Django
 from django.conf import settings
@@ -27,12 +27,13 @@ import djangochannelsrestframework
 # -- Project information -----------------------------------------------------
 
 project = "djangochannelsrestframework"
-copyright = "2021, hishnash"
-author = "hishnash"
+copyright = "2025, Nil Coalescing Limited"
+author = "Nil Coalescing Limited"
 
 
 # -- General configuration ---------------------------------------------------
 
+default_role = "obj"
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.

@@ -1,8 +1,15 @@
+import asyncio
 import json
 import typing
 from collections import defaultdict
-from functools import partial
+from functools import partial, wraps
 from typing import Dict, List, Type, Any, Set
+
+import logging
+
+
+# Get an instance of a logger
+logger = logging.getLogger(__name__)
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -10,12 +17,13 @@ from django.http import HttpRequest, HttpResponse
 from django.http.response import Http404
 from django.template.response import SimpleTemplateResponse
 from rest_framework.exceptions import PermissionDenied, MethodNotAllowed, APIException
-from rest_framework.permissions import BasePermission as DRFBasePermission
+from rest_framework.permissions import BasePermission as DRFBasePermission, OR, AND, NOT
 from rest_framework.response import Response
 
 from djangochannelsrestframework.settings import api_settings
 from djangochannelsrestframework.permissions import BasePermission, WrappedDRFPermission
 from djangochannelsrestframework.scope_utils import request_from_scope, ensure_async
+from djangochannelsrestframework.exceptions import ActionMissingException
 
 
 class APIConsumerMetaclass(type):
@@ -43,7 +51,9 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
     This provides an async API consumer that is very inspired by DjangoRestFrameworks ViewSets.
 
     Attributes:
-        permission_classes     An array for Permission classes
+        permission_classes:  An array for permission classes,
+            All permission classes are checked on connect and before handling any actions.
+            See :doc:`permissions <permissions>` for more detail on building custom permissions.
 
     """
 
@@ -60,6 +70,10 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
     _observer_group_to_request_id: Dict[str, Dict[str, Set[Any]]] = defaultdict(
         lambda: defaultdict(set)
     )
+
+    # Detached Tasks
+    # type: List[asyncio.Task]
+    detached_tasks = []
 
     async def websocket_connect(self, message):
         """
@@ -78,12 +92,14 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.groups = set(self.groups or [])
-
+        self.detached_tasks = []
         self._observer_group_to_request_id = defaultdict(lambda: defaultdict(set))
 
     async def add_group(self, name: str):
         """
         Add a group to the set of groups this consumer is subscribed to.
+
+        You should always use this method rather than `self.channel_layer.group_add` to ensure proper bookkeeping.
         """
         if not isinstance(self.groups, set):
             self.groups = set(self.groups)
@@ -95,6 +111,8 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
     async def remove_group(self, name: str):
         """
         Remove a group to the set of groups this consumer is subscribed to.
+
+        You should always use this method rather than `self.channel_layer.group_discard` to ensure proper bookkeeping.
         """
         if not isinstance(self.groups, set):
             self.groups = set(self.groups)
@@ -112,7 +130,7 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
             instance = permission_class()
 
             # If the permission is an DRF permission instance
-            if isinstance(instance, DRFBasePermission):
+            if isinstance(instance, (DRFBasePermission, OR, AND, NOT)):
                 instance = WrappedDRFPermission(instance)
             permission_instances.append(instance)
 
@@ -130,7 +148,9 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
             ):
                 raise PermissionDenied()
 
-    async def handle_exception(self, exc: Exception, action: str, request_id):
+    async def handle_exception(
+        self, exc: Exception, action: typing.Optional[str], request_id
+    ):
         """
         Handle any exception that occurs, by sending an appropriate message
         """
@@ -149,6 +169,10 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
                 request_id=request_id,
             )
         else:
+            logger.error(
+                f"Error when handling request: {request_id} from client for action: {action}",
+                exc_info=exc,
+            )
             raise exc
 
     def _format_errors(self, errors):
@@ -192,8 +216,20 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
             await self.handle_exception(exc, action=action, request_id=request_id)
 
     async def receive_json(self, content: typing.Dict, **kwargs):
-        request_id = content.pop("request_id")
-        action, content = await self.get_action_name(content, **kwargs)
+        request_id = content.pop("request_id", None)
+        action: str
+        content: Dict
+        try:
+            action, content = await self.get_action_name(content, **kwargs)
+        except KeyError as e:
+            await self.handle_exception(
+                ActionMissingException(), action=None, request_id=request_id
+            )
+            return
+        except Exception as e:
+            await self.handle_exception(e, action=None, request_id=request_id)
+            return
+
         await self.handle_action(action, request_id=request_id, **content)
 
     async def get_action_name(
@@ -207,10 +243,15 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
         Override this method if you do not want to use `{"action": "action_name"}` as the way to describe actions.
         """
         action = content.pop("action")
-        return (action, content)
+        return action, content
 
     async def reply(
-        self, action: str, data=None, errors=None, status=200, request_id=None
+        self,
+        action: typing.Optional[str],
+        data=None,
+        errors=None,
+        status=200,
+        request_id=None,
     ):
         """
         Send a json response back to the client.
@@ -231,6 +272,26 @@ class AsyncAPIConsumer(AsyncJsonWebsocketConsumer, metaclass=APIConsumerMetaclas
         }
 
         await self.send_json(payload)
+
+    async def handle_detached_task_completion(self, task: asyncio.Task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Error while waiting for detached task to finish", exc_info=e)
+        finally:
+            try:
+                self.detached_tasks.remove(task)
+            except ValueError:
+                # If the task has already been removed
+                pass
+
+    async def websocket_disconnect(self, message):
+        for task in self.detached_tasks:
+            task.cancel()
+            await self.handle_detached_task_completion(task)
+        await super().websocket_disconnect(message)
 
 
 class DjangoViewAsConsumer(AsyncAPIConsumer):

@@ -1,14 +1,15 @@
 Observer model instance
 =======================
 
-This mixin consumer lets you subscribe to all changes of a specific instance, and 
-also gives you access to the ``retrieve`` action.
+This mixin consumer lets you subscribe to all changes of a specific instance and
+gives you access to the ``retrieve`` action.
 
 .. code-block:: python
 
     # serializers.py
     from rest_framework import serializers
     from django.contrib.auth.models import User
+
     class UserSerializer(serializers.ModelSerializer):
         
         class Meta:
@@ -52,7 +53,7 @@ also gives you access to the ``retrieve`` action.
 How to use it
 -------------
 
-First we will create the web socket instance in ``javascript``.
+First, we will create the web socket instance in ``javascript``.
 
 .. code-block:: javascript
 
@@ -92,7 +93,7 @@ Subscription
 .. code-block:: javascript
 
     ws.send(JSON.stringify({
-        action: "retrieve",
+        action: "subscribe_instance",
         request_id: new Date().getTime(),
         pk: 1,
     }))
@@ -106,7 +107,7 @@ Subscription
     }
     */
 
-2. Changing the model instance in from the shell will fire the subscription event.
+2. Changing the model instance from the shell will fire the subscription event.
 
 .. code-block:: python
 
@@ -115,7 +116,7 @@ Subscription
     >>> user.username = "edited user name"
     >>> user.save()
 
-3. After saving the model instance, in the console, we will see the subscription message.
+3. After saving the model instance in the console, we will see the subscription message.
 
 .. code-block:: javascript
 
@@ -127,8 +128,3 @@ Subscription
         data: {email: '1@example.com', id: 1, username: 'edited user name'},
     }
 
-
-Todo
-----
-
-* More detail example.

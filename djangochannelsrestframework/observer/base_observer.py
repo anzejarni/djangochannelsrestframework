@@ -91,7 +91,7 @@ class BaseObserver:
                 queryset = User.objects.all()
                 serializer_class = UserSerializer
 
-                @model_observer(Comments)
+                @model_observer(Comment)
                 async def comment_activity(self, message, observer=None, subscribing_request_ids=[], **kwargs):
                     ...
 
@@ -101,6 +101,8 @@ class BaseObserver:
 
         The advantage of doing serialization at this point is that it happens only once even if 1000s of consumers are
         subscribed to the event.
+        The disadvantage is this will always be called on every model **update/create/delete** even if
+        there are no active subscribers.
         """
         self._serializer = func
         return self
@@ -123,7 +125,7 @@ class BaseObserver:
                 queryset = User.objects.all()
                 serializer_class = UserSerializer
 
-                @model_observer(Comments)
+                @model_observer(Comment)
                 async def comment_activity(self, message, observer=None, subscribing_request_ids=[], **kwargs):
                     ...
 
@@ -145,7 +147,11 @@ class BaseObserver:
         return groups
 
     async def unsubscribe(
-        self, consumer: AsyncAPIConsumer, *args, request_id=None, **kwargs
+        self,
+        consumer: AsyncAPIConsumer,
+        *args,
+        request_id: Optional[str] = None,
+        **kwargs,
     ) -> Iterable[str]:
         """
         This should be called to unsubscribe the current consumer.
@@ -163,7 +169,7 @@ class BaseObserver:
                 queryset = User.objects.all()
                 serializer_class = UserSerializer
 
-                @model_observer(Comments)
+                @model_observer(Comment)
                 async def comment_activity(self, message, observer=None, subscribing_request_ids=[], **kwargs):
                     ...
 
@@ -175,12 +181,10 @@ class BaseObserver:
         groups = list(self.group_names_for_consumer(*args, consumer=consumer, **kwargs))
 
         for group_name in groups:
-            # remove group to request mappings
             if (
                 group_name
                 in consumer._observer_group_to_request_id[self._stable_observer_id]
             ):
-                # unsubscribe all requests to this group
                 if request_id is None:
                     consumer._observer_group_to_request_id[
                         self._stable_observer_id
@@ -188,17 +192,22 @@ class BaseObserver:
                 else:
                     consumer._observer_group_to_request_id[self._stable_observer_id][
                         group_name
-                    ].remove(request_id)
+                    ].discard(request_id)
 
-            if (
-                len(
-                    consumer._observer_group_to_request_id[self._stable_observer_id][
-                        group_name
+                    if not consumer._observer_group_to_request_id[
+                        self._stable_observer_id
+                    ][group_name]:
+                        consumer._observer_group_to_request_id[
+                            self._stable_observer_id
+                        ].pop(group_name)
+
+                if (
+                    group_name
+                    not in consumer._observer_group_to_request_id[
+                        self._stable_observer_id
                     ]
-                )
-                > 0
-            ):
-                await consumer.remove_group(group_name)
+                ):
+                    await consumer.remove_group(group_name)
 
         return groups
 
